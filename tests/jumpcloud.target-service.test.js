@@ -102,6 +102,7 @@ test("TargetServiceClient discovers OpenAPI operations across both domains", asy
       consoleSpecUrl: "https://example.test/console-spec.yaml",
       directoryInsightsSpecUrl: "https://example.test/directory-spec.yaml",
       appName: "jumpcloud",
+      defaultTenantId: "default",
       defaultUserId: "default",
       vaultService: vault
     });
@@ -130,11 +131,13 @@ test("TargetServiceClient requestByOperation uses multi-user Vault token", async
       consoleSpecUrl: "https://example.test/console-spec.yaml",
       directoryInsightsSpecUrl: "https://example.test/directory-spec.yaml",
       appName: "jumpcloud",
+      defaultTenantId: "default",
       defaultUserId: "default",
       vaultService: vault
     });
 
     await client.upsertUserToken({
+      tenantId: "tenant-a",
       userId: "team-a",
       tokenId: "primary",
       value: "api-key-1",
@@ -142,9 +145,10 @@ test("TargetServiceClient requestByOperation uses multi-user Vault token", async
       headerName: "x-api-key"
     });
 
-    await client.setActiveUserToken({ userId: "team-a", tokenId: "primary" });
+    await client.setActiveUserToken({ tenantId: "tenant-a", userId: "team-a", tokenId: "primary" });
 
     const response = await client.requestByOperation({
+      tenantId: "tenant-a",
       userId: "team-a",
       operationId: "systemusers_update",
       pathParams: { id: "abc123" },

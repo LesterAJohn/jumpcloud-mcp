@@ -43,8 +43,8 @@ function createServiceClientMock() {
         directoryInsightsBaseUrl: "https://api.jumpcloud.com"
       };
     },
-    getUserTokenPath(userId) {
-      return `jumpcloud/users/${userId}/jumpcloud/tokens`;
+    getUserTokenPath(tenantId, userId) {
+      return `jumpcloud/tenants/${tenantId}/users/${userId}/jumpcloud/tokens`;
     },
     async listKnownEndpoints() {
       return {
@@ -83,34 +83,36 @@ function createServiceClientMock() {
       }
       return { operationId, method: "GET" };
     },
-    async getUserTokens(userId) {
+    async getUserTokens(tenantId, userId) {
       return {
+        tenantId,
         userId,
         activeTokenId: "primary",
-        tokens: tokensByUser.get(userId) ?? {}
+        tokens: tokensByUser.get(`${tenantId}/${userId}`) ?? {}
       };
     },
-    async upsertUserToken({ userId, tokenId }) {
+    async upsertUserToken({ tenantId, userId, tokenId }) {
       calls.upsert += 1;
-      const existing = tokensByUser.get(userId) ?? {};
+      const scopeId = `${tenantId}/${userId}`;
+      const existing = tokensByUser.get(scopeId) ?? {};
       existing[tokenId] = {
         tokenId,
         value: "[REDACTED]",
         active: true
       };
-      tokensByUser.set(userId, existing);
-      return { userId, tokenId, activeTokenId: tokenId };
+      tokensByUser.set(scopeId, existing);
+      return { tenantId, userId, tokenId, activeTokenId: tokenId };
     },
-    async setActiveUserToken({ userId, tokenId }) {
+    async setActiveUserToken({ tenantId, userId, tokenId }) {
       calls.setActive += 1;
-      return { userId, activeTokenId: tokenId };
+      return { tenantId, userId, activeTokenId: tokenId };
     },
-    async deleteUserToken({ userId, tokenId }) {
+    async deleteUserToken({ tenantId, userId, tokenId }) {
       calls.remove += 1;
-      return { userId, activeTokenId: null, remainingTokenCount: 0, deletedTokenId: tokenId };
+      return { tenantId, userId, activeTokenId: null, remainingTokenCount: 0, deletedTokenId: tokenId };
     },
-    async healthCheck(userId, tokenId) {
-      return { status: 200, userId, tokenId };
+    async healthCheck(tenantId, userId, tokenId) {
+      return { status: 200, tenantId, userId, tokenId };
     },
     async request(payload) {
       calls.request += 1;
@@ -136,25 +138,26 @@ function createConfigStoreMock() {
 
   return {
     tableName: "jumpcloud_config",
-    async listConfigs(prefix = "", userId = "default") {
+    async listConfigs(prefix = "", tenantId = "default", userId = "default") {
       const output = [];
       for (const [key, value] of records.entries()) {
-        if (key.startsWith(`${userId}:`) && (!prefix || key.slice(userId.length + 1).startsWith(prefix))) {
-          output.push({ key: key.slice(userId.length + 1), value });
+        const scopePrefix = `${tenantId}/${userId}:`;
+        if (key.startsWith(scopePrefix) && (!prefix || key.slice(scopePrefix.length).startsWith(prefix))) {
+          output.push({ key: key.slice(scopePrefix.length), value, tenant_id: tenantId, scoped_user_id: userId });
         }
       }
       return output;
     },
-    async getConfig(key, userId = "default") {
-      const value = records.get(`${userId}:${key}`);
-      return value === undefined ? null : { user_id: userId, key, value };
+    async getConfig(key, tenantId = "default", userId = "default") {
+      const value = records.get(`${tenantId}/${userId}:${key}`);
+      return value === undefined ? null : { user_id: `${tenantId}/${userId}`, tenant_id: tenantId, scoped_user_id: userId, key, value };
     },
-    async setConfig(key, value, userId = "default") {
-      records.set(`${userId}:${key}`, value);
-      return { user_id: userId, key, value };
+    async setConfig(key, value, tenantId = "default", userId = "default") {
+      records.set(`${tenantId}/${userId}:${key}`, value);
+      return { user_id: `${tenantId}/${userId}`, tenant_id: tenantId, scoped_user_id: userId, key, value };
     },
-    async deleteConfig(key, userId = "default") {
-      return records.delete(`${userId}:${key}`);
+    async deleteConfig(key, tenantId = "default", userId = "default") {
+      return records.delete(`${tenantId}/${userId}:${key}`);
     }
   };
 }
@@ -178,6 +181,7 @@ test("jumpcloud_query_suggestion returns suggested operations and tool schemas",
       serviceClient: client,
       configStore: createConfigStoreMock(),
       appName: "jumpcloud",
+      defaultTenantId: "default",
       defaultUserId: "default"
     });
 
@@ -207,6 +211,7 @@ test("jumpcloud_api_request mutating method requires authorizationKey when admin
       serviceClient: client,
       configStore: createConfigStoreMock(),
       appName: "jumpcloud",
+      defaultTenantId: "default",
       defaultUserId: "default"
     });
 
@@ -246,6 +251,7 @@ test("jumpcloud_user_token_upsert requires authorizationKey when admin key confi
       serviceClient: client,
       configStore: createConfigStoreMock(),
       appName: "jumpcloud",
+      defaultTenantId: "default",
       defaultUserId: "default"
     });
 
@@ -284,6 +290,7 @@ test("jumpcloud_config_set writes user-scoped config", async () => {
       serviceClient: client,
       configStore,
       appName: "jumpcloud",
+      defaultTenantId: "default",
       defaultUserId: "default"
     });
 

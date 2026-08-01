@@ -84,6 +84,7 @@ export const env = {
   mcpServerVersion: process.env.MCP_SERVER_VERSION ?? "0.1.0",
   adminAuthKey: process.env.MCP_ADMIN_AUTH_KEY ?? "",
   allowSensitiveOutput: booleanValue("MCP_ALLOW_SENSITIVE_OUTPUT", false),
+  defaultTenantId: optional("MCP_CONFIG_DEFAULT_TENANT_ID", "default").trim() || "default",
   defaultUserId: optional("MCP_CONFIG_DEFAULT_USER_ID", "default").trim() || "default",
   jumpcloud: {
     timeoutMs: positiveNumber("JUMPCLOUD_TIMEOUT_MS", "20000"),

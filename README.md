@@ -14,7 +14,7 @@ This repository is adapted from `skeleton-mcp` into a JumpCloud-specific impleme
 Key design requirements implemented:
 - Secrets are persisted in Vault only.
 - Configuration is persisted in Postgres only.
-- User tokens are multi-user by design (`app/users/:userId/jumpcloud/tokens`).
+- User tokens are scoped by tenant and user (`app/tenants/:tenantId/users/:userId/jumpcloud/tokens`).
 - Mutation tools can require `authorizationKey` when `MCP_ADMIN_AUTH_KEY` is configured.
 - Full JumpCloud API coverage is supported via OpenAPI-driven discovery and execution.
 
@@ -60,8 +60,8 @@ Runtime flow:
 7. `src/mcp/server.js` registers tools, auth checks, and responses.
 
 Persistence model:
-- Secrets: Vault KV (`secret/data/<app>/users/<user>/jumpcloud/tokens`)
-- Config: Postgres table (`<app>_config`) scoped by `user_id`
+- Secrets: Vault KV (`secret/data/<app>/tenants/<tenant>/users/<user>/jumpcloud/tokens`)
+- Config: Postgres table (`<app>_config`) scoped by composite scope id (`tenantId/userId` stored in `user_id`)
 
 ## Setup
 

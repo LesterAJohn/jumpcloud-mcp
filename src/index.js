@@ -18,6 +18,7 @@ async function main() {
 
   const configStore = new ConfigStore(env.postgres, {
     appName: env.appName,
+    defaultTenantId: env.defaultTenantId,
     defaultUserId: env.defaultUserId
   });
 
@@ -42,6 +43,7 @@ async function main() {
     consoleSpecUrl: env.jumpcloud.consoleSpecUrl,
     directoryInsightsSpecUrl: env.jumpcloud.directoryInsightsSpecUrl,
     appName: env.appName,
+    defaultTenantId: env.defaultTenantId,
     defaultUserId: env.defaultUserId,
     vaultService
   });
@@ -53,6 +55,7 @@ async function main() {
     configStore,
     allowSensitiveOutput: env.allowSensitiveOutput,
     appName: env.appName,
+    defaultTenantId: env.defaultTenantId,
     defaultUserId: env.defaultUserId
   });
 

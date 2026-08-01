@@ -34,8 +34,14 @@ UPDATE ${TABLE_NAME}
 SET user_id = 'default'
 WHERE user_id IS NULL OR trim(user_id) = '';
 
+UPDATE ${TABLE_NAME}
+SET user_id = 'default/' || user_id
+WHERE user_id IS NOT NULL
+  AND trim(user_id) <> ''
+  AND position('/' in user_id) = 0;
+
 ALTER TABLE ${TABLE_NAME}
-  ALTER COLUMN user_id SET DEFAULT 'default';
+  ALTER COLUMN user_id SET DEFAULT 'default/default';
 
 ALTER TABLE ${TABLE_NAME}
   ALTER COLUMN user_id SET NOT NULL;
@@ -44,11 +50,11 @@ CREATE INDEX IF NOT EXISTS ${TABLE_NAME}_key_idx ON ${TABLE_NAME} (key);
 
 INSERT INTO ${TABLE_NAME} (user_id, key, value)
 VALUES
-  ('default', 'sample.feature', '{"enabled": true, "rollout": 25}'),
-  ('default', 'app.defaults', '{"version": 1, "parameters": {}}'),
-  ('default', 'token.rotation.intervalMs', '86400000'),
-  ('default', 'vault.agent.auth.mode', '"file"'),
-  ('default', 'vault.agent.tokenFilePath', '"/tmp/vault-agent-token"'),
-  ('default', 'vault.agent.listener.addr', '"http://127.0.0.1:8100"')
+  ('default/default', 'sample.feature', '{"enabled": true, "rollout": 25}'),
+  ('default/default', 'app.defaults', '{"version": 1, "parameters": {}}'),
+  ('default/default', 'token.rotation.intervalMs', '86400000'),
+  ('default/default', 'vault.agent.auth.mode', '"file"'),
+  ('default/default', 'vault.agent.tokenFilePath', '"/tmp/vault-agent-token"'),
+  ('default/default', 'vault.agent.listener.addr', '"http://127.0.0.1:8100"')
 ON CONFLICT (user_id, key) DO NOTHING;
 SQL

@@ -260,6 +260,7 @@ export function createMcpServer({
   configStore,
   allowSensitiveOutput = false,
   appName = "jumpcloud",
+  defaultTenantId = "default",
   defaultUserId = "default"
 }) {
   const server = new McpServer({
@@ -281,8 +282,13 @@ export function createMcpServer({
     }
   }
 
-  function effectiveUserId(userId) {
-    return String(userId ?? defaultUserId).trim() || defaultUserId;
+  function effectiveScope(tenantId, userId) {
+    const resolvedTenantId = String(tenantId ?? defaultTenantId).trim() || defaultTenantId;
+    const resolvedUserId = String(userId ?? defaultUserId).trim() || defaultUserId;
+    return {
+      tenantId: resolvedTenantId,
+      userId: resolvedUserId
+    };
   }
 
   server.tool(
@@ -297,6 +303,7 @@ export function createMcpServer({
           name,
           version,
           appName,
+          defaultTenantId,
           defaultUserId,
           adminAuthConfigured: Boolean(adminAuthKey)
         },
@@ -311,20 +318,26 @@ export function createMcpServer({
 
   server.tool(
     "jumpcloud_scope_info",
-    "Read-only scope resolver. Use when you need the effective app/user scope and storage locations. Do not use for mutation. Risk: low.",
+    "Read-only scope resolver. Use when you need the effective app/tenant/user scope and storage locations. Do not use for mutation. Risk: low.",
     {
+      tenantId: z.string().min(1).optional(),
       userId: z.string().min(1).optional()
     },
-    withErrorHandling(async ({ userId }) => ({
-      ok: true,
-      status: 200,
-      data: {
-        appName,
-        userId: effectiveUserId(userId),
-        vaultTokenPath: serviceClient.getUserTokenPath(effectiveUserId(userId)),
-        postgresConfigTable: configStore.tableName
-      }
-    }))
+    withErrorHandling(async ({ tenantId, userId }) => {
+      const scope = effectiveScope(tenantId, userId);
+      return {
+        ok: true,
+        status: 200,
+        data: {
+          appName,
+          tenantId: scope.tenantId,
+          userId: scope.userId,
+          vaultTokenPath: serviceClient.getUserTokenPath(scope.tenantId, scope.userId),
+          postgresConfigTable: configStore.tableName,
+          postgresScopeId: `${scope.tenantId}/${scope.userId}`
+        }
+      };
+    })
   );
 
   server.tool(
@@ -383,7 +396,7 @@ export function createMcpServer({
             },
             {
               tool: "jumpcloud_user_token_list",
-              reason: "Confirm active per-user token exists in Vault."
+              reason: "Confirm active per-tenant/user token exists in Vault."
             },
             {
               tool: "jumpcloud_openapi_discovery",
@@ -396,7 +409,7 @@ export function createMcpServer({
           ],
           suggestedOperations: suggestions,
           safetyChecks: [
-            "Confirm the intended userId before executing any request.",
+            "Confirm the intended tenantId and userId before executing any request.",
             "For mutating operations, require explicit authorizationKey when MCP_ADMIN_AUTH_KEY is configured.",
             "Use jumpcloud_openapi_discovery to confirm path and method before mutating calls.",
             "Store API keys only in Vault via jumpcloud_user_token_upsert; never in config tools."
@@ -416,25 +429,30 @@ export function createMcpServer({
     "jumpcloud_user_token_list",
     "Read-only token metadata listing. Use to inspect user-scoped token entries and active token selection. Do not use to rotate/update secrets. Risk: medium.",
     {
+      tenantId: z.string().min(1).optional(),
       userId: z.string().min(1).optional(),
       includeSensitive: z.boolean().optional()
     },
-    withErrorHandling(async ({ userId, includeSensitive }) => ({
-      ok: true,
-      status: 200,
-      data: redactObject(
-        await serviceClient.getUserTokens(effectiveUserId(userId), {
-          includeSensitive: includeSensitive === true && allowSensitiveOutput
-        }),
-        includeSensitive === true && allowSensitiveOutput
-      )
-    }))
+    withErrorHandling(async ({ tenantId, userId, includeSensitive }) => {
+      const scope = effectiveScope(tenantId, userId);
+      return {
+        ok: true,
+        status: 200,
+        data: redactObject(
+          await serviceClient.getUserTokens(scope.tenantId, scope.userId, {
+            includeSensitive: includeSensitive === true && allowSensitiveOutput
+          }),
+          includeSensitive === true && allowSensitiveOutput
+        )
+      };
+    })
   );
 
   server.tool(
     "jumpcloud_user_token_upsert",
     "Mutating token create/update. Use to add or rotate JumpCloud user tokens in Vault. Do not use for read-only workflows. Risk: high.",
     {
+      tenantId: z.string().min(1).optional(),
       userId: z.string().min(1).optional(),
       tokenId: z.string().min(1),
       value: z.string().min(1),
@@ -443,14 +461,17 @@ export function createMcpServer({
       description: z.string().optional(),
       authorizationKey: z.string().optional()
     },
-    withErrorHandling(async ({ userId, tokenId, value, tokenType, headerName, description, authorizationKey }) => {
+    withErrorHandling(async ({ tenantId, userId, tokenId, value, tokenType, headerName, description, authorizationKey }) => {
       assertAdminAuthorized(authorizationKey, "token update");
+
+      const scope = effectiveScope(tenantId, userId);
 
       return {
         ok: true,
         status: 200,
         data: await serviceClient.upsertUserToken({
-          userId: effectiveUserId(userId),
+          tenantId: scope.tenantId,
+          userId: scope.userId,
           tokenId,
           value,
           tokenType,
@@ -465,17 +486,20 @@ export function createMcpServer({
     "jumpcloud_user_token_set_active",
     "Mutating token selection. Use to change active token for a user. Do not use to create tokens. Risk: medium.",
     {
+      tenantId: z.string().min(1).optional(),
       userId: z.string().min(1).optional(),
       tokenId: z.string().min(1),
       authorizationKey: z.string().optional()
     },
-    withErrorHandling(async ({ userId, tokenId, authorizationKey }) => {
+    withErrorHandling(async ({ tenantId, userId, tokenId, authorizationKey }) => {
       assertAdminAuthorized(authorizationKey, "token update");
+      const scope = effectiveScope(tenantId, userId);
       return {
         ok: true,
         status: 200,
         data: await serviceClient.setActiveUserToken({
-          userId: effectiveUserId(userId),
+          tenantId: scope.tenantId,
+          userId: scope.userId,
           tokenId
         })
       };
@@ -486,17 +510,20 @@ export function createMcpServer({
     "jumpcloud_user_token_delete",
     "Mutating token deletion. Use when removing obsolete user tokens from Vault. Destructive. Risk: high.",
     {
+      tenantId: z.string().min(1).optional(),
       userId: z.string().min(1).optional(),
       tokenId: z.string().min(1),
       authorizationKey: z.string().optional()
     },
-    withErrorHandling(async ({ userId, tokenId, authorizationKey }) => {
+    withErrorHandling(async ({ tenantId, userId, tokenId, authorizationKey }) => {
       assertAdminAuthorized(authorizationKey, "token deletion");
+      const scope = effectiveScope(tenantId, userId);
       return {
         ok: true,
         status: 200,
         data: await serviceClient.deleteUserToken({
-          userId: effectiveUserId(userId),
+          tenantId: scope.tenantId,
+          userId: scope.userId,
           tokenId
         })
       };
@@ -507,45 +534,55 @@ export function createMcpServer({
     "jumpcloud_config_list",
     "Read-only Postgres config listing. Use to enumerate app/user scoped non-secret configuration values. Do not store secrets in config. Risk: low.",
     {
+      tenantId: z.string().min(1).optional(),
       userId: z.string().min(1).optional(),
       prefix: z.string().optional()
     },
-    withErrorHandling(async ({ userId, prefix }) => ({
-      ok: true,
-      status: 200,
-      data: await configStore.listConfigs(prefix, effectiveUserId(userId))
-    }))
+    withErrorHandling(async ({ tenantId, userId, prefix }) => {
+      const scope = effectiveScope(tenantId, userId);
+      return {
+        ok: true,
+        status: 200,
+        data: await configStore.listConfigs(prefix, scope.tenantId, scope.userId)
+      };
+    })
   );
 
   server.tool(
     "jumpcloud_config_get",
     "Read-only Postgres config getter. Use to fetch one user-scoped configuration key. Risk: low.",
     {
+      tenantId: z.string().min(1).optional(),
       userId: z.string().min(1).optional(),
       key: z.string().min(1)
     },
-    withErrorHandling(async ({ userId, key }) => ({
-      ok: true,
-      status: 200,
-      data: await configStore.getConfig(key, effectiveUserId(userId))
-    }))
+    withErrorHandling(async ({ tenantId, userId, key }) => {
+      const scope = effectiveScope(tenantId, userId);
+      return {
+        ok: true,
+        status: 200,
+        data: await configStore.getConfig(key, scope.tenantId, scope.userId)
+      };
+    })
   );
 
   server.tool(
     "jumpcloud_config_set",
     "Mutating Postgres config setter. Use for non-secret runtime configuration. Do not store token values. Risk: medium.",
     {
+      tenantId: z.string().min(1).optional(),
       userId: z.string().min(1).optional(),
       key: z.string().min(1),
       value: z.unknown(),
       authorizationKey: z.string().optional()
     },
-    withErrorHandling(async ({ userId, key, value, authorizationKey }) => {
+    withErrorHandling(async ({ tenantId, userId, key, value, authorizationKey }) => {
       assertAdminAuthorized(authorizationKey, "configuration update");
+      const scope = effectiveScope(tenantId, userId);
       return {
         ok: true,
         status: 200,
-        data: await configStore.setConfig(key, value, effectiveUserId(userId))
+        data: await configStore.setConfig(key, value, scope.tenantId, scope.userId)
       };
     })
   );
@@ -554,17 +591,19 @@ export function createMcpServer({
     "jumpcloud_config_delete",
     "Mutating Postgres config delete. Use to remove obsolete non-secret settings. Destructive. Risk: high.",
     {
+      tenantId: z.string().min(1).optional(),
       userId: z.string().min(1).optional(),
       key: z.string().min(1),
       authorizationKey: z.string().optional()
     },
-    withErrorHandling(async ({ userId, key, authorizationKey }) => {
+    withErrorHandling(async ({ tenantId, userId, key, authorizationKey }) => {
       assertAdminAuthorized(authorizationKey, "configuration deletion");
+      const scope = effectiveScope(tenantId, userId);
       return {
         ok: true,
         status: 200,
         data: {
-          deleted: await configStore.deleteConfig(key, effectiveUserId(userId))
+          deleted: await configStore.deleteConfig(key, scope.tenantId, scope.userId)
         }
       };
     })
@@ -574,20 +613,25 @@ export function createMcpServer({
     "jumpcloud_health_check",
     "Read-only health and credential check against JumpCloud using current user's active token. Use before large workflows. Risk: low.",
     {
+      tenantId: z.string().min(1).optional(),
       userId: z.string().min(1).optional(),
       tokenId: z.string().min(1).optional()
     },
-    withErrorHandling(async ({ userId, tokenId }) => ({
-      ok: true,
-      status: 200,
-      data: await serviceClient.healthCheck(effectiveUserId(userId), tokenId)
-    }))
+    withErrorHandling(async ({ tenantId, userId, tokenId }) => {
+      const scope = effectiveScope(tenantId, userId);
+      return {
+        ok: true,
+        status: 200,
+        data: await serviceClient.healthCheck(scope.tenantId, scope.userId, tokenId)
+      };
+    })
   );
 
   server.tool(
     "jumpcloud_operation_invoke",
     "OpenAPI operation invoker. Use operationId+pathParams for high-fidelity execution with full API coverage. Mutating calls require admin key if configured. Risk: variable.",
     {
+      tenantId: z.string().min(1).optional(),
       userId: z.string().min(1).optional(),
       tokenId: z.string().min(1).optional(),
       operationId: z.string().min(1),
@@ -597,17 +641,20 @@ export function createMcpServer({
       headers: z.record(z.string(), z.string()).optional(),
       authorizationKey: z.string().optional()
     },
-    withErrorHandling(async ({ userId, tokenId, operationId, pathParams, query, body, headers, authorizationKey }) => {
+    withErrorHandling(async ({ tenantId, userId, tokenId, operationId, pathParams, query, body, headers, authorizationKey }) => {
       const operation = await serviceClient.getOperationById(operationId);
       if (operation && MUTATING_METHODS.has(normalizeMethod(operation.method))) {
         assertAdminAuthorized(authorizationKey, "mutating OpenAPI operation");
       }
 
+      const scope = effectiveScope(tenantId, userId);
+
       return {
         ok: true,
         status: 200,
         data: await serviceClient.requestByOperation({
-          userId: effectiveUserId(userId),
+          tenantId: scope.tenantId,
+          userId: scope.userId,
           tokenId,
           operationId,
           pathParams,
@@ -623,6 +670,7 @@ export function createMcpServer({
     "jumpcloud_api_request",
     "Generic JumpCloud request executor. Use for explicit domain/method/path calls with full endpoint coverage. Mutations require admin key if configured. Risk: variable.",
     {
+      tenantId: z.string().min(1).optional(),
       userId: z.string().min(1).optional(),
       tokenId: z.string().min(1).optional(),
       domain: z.enum(["console", "directory-insights"]).optional(),
@@ -633,17 +681,20 @@ export function createMcpServer({
       headers: z.record(z.string(), z.string()).optional(),
       authorizationKey: z.string().optional()
     },
-    withErrorHandling(async ({ userId, tokenId, domain, method, path, query, body, headers, authorizationKey }) => {
+    withErrorHandling(async ({ tenantId, userId, tokenId, domain, method, path, query, body, headers, authorizationKey }) => {
       const normalizedMethod = normalizeMethod(method);
       if (MUTATING_METHODS.has(normalizedMethod)) {
         assertAdminAuthorized(authorizationKey, "mutating API request");
       }
 
+      const scope = effectiveScope(tenantId, userId);
+
       return {
         ok: true,
         status: 200,
         data: await serviceClient.request({
-          userId: effectiveUserId(userId),
+          tenantId: scope.tenantId,
+          userId: scope.userId,
           tokenId,
           domain,
           method: normalizedMethod,

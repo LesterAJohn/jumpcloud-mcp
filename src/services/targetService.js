@@ -115,6 +115,7 @@ export class TargetServiceClient {
     consoleSpecUrl,
     directoryInsightsSpecUrl,
     appName,
+    defaultTenantId,
     defaultUserId,
     vaultService
   }) {
@@ -124,6 +125,7 @@ export class TargetServiceClient {
     this.consoleSpecUrl = String(consoleSpecUrl ?? "").trim();
     this.directoryInsightsSpecUrl = String(directoryInsightsSpecUrl ?? "").trim();
     this.appName = String(appName ?? "jumpcloud").trim() || "jumpcloud";
+    this.defaultTenantId = String(defaultTenantId ?? "default").trim() || "default";
     this.defaultUserId = String(defaultUserId ?? "default").trim() || "default";
     this.vaultService = vaultService;
 
@@ -139,24 +141,40 @@ export class TargetServiceClient {
       directoryInsightsSpecUrl: this.directoryInsightsSpecUrl,
       tokenStorage: {
         provider: "vault",
-        scope: "multi-user",
-        vaultKvPrefix: `${this.appName}/users/:userId/jumpcloud/tokens`
+        scope: "multi-tenant-user",
+        vaultKvPrefix: `${this.appName}/tenants/:tenantId/users/:userId/jumpcloud/tokens`
       }
     };
   }
 
-  getUserTokenPath(userId) {
-    const normalizedUser = String(userId ?? this.defaultUserId).trim() || this.defaultUserId;
-    return `${this.appName}/users/${normalizedUser}/jumpcloud/tokens`;
+  resolveScope(tenantId, userId) {
+    const resolvedTenantId = String(tenantId ?? this.defaultTenantId).trim() || this.defaultTenantId;
+    const resolvedUserId = String(userId ?? this.defaultUserId).trim() || this.defaultUserId;
+    return {
+      tenantId: resolvedTenantId,
+      userId: resolvedUserId
+    };
   }
 
-  async getUserTokens(userId, { includeSensitive = false } = {}) {
-    const path = this.getUserTokenPath(userId);
+  getUserTokenPath(tenantId, userId) {
+    const scope = this.resolveScope(tenantId, userId);
+    return `${this.appName}/tenants/${scope.tenantId}/users/${scope.userId}/jumpcloud/tokens`;
+  }
+
+  getTenantTokenPrefix(tenantId) {
+    const scope = this.resolveScope(tenantId);
+    return `${this.appName}/tenants/${scope.tenantId}/users`;
+  }
+
+  async getUserTokens(tenantId, userId, { includeSensitive = false } = {}) {
+    const scope = this.resolveScope(tenantId, userId);
+    const path = this.getUserTokenPath(scope.tenantId, scope.userId);
     const payload = normalizeTokenPayload(await this.vaultService.getSecret(path));
 
     if (includeSensitive) {
       return {
-        userId: String(userId ?? this.defaultUserId).trim() || this.defaultUserId,
+        tenantId: scope.tenantId,
+        userId: scope.userId,
         ...payload
       };
     }
@@ -170,14 +188,23 @@ export class TargetServiceClient {
     }
 
     return {
-      userId: String(userId ?? this.defaultUserId).trim() || this.defaultUserId,
+      tenantId: scope.tenantId,
+      userId: scope.userId,
       activeTokenId: payload.activeTokenId,
       tokens: redactedTokens
     };
   }
 
-  async upsertUserToken({ userId, tokenId, value, tokenType = "apiKey", headerName = "x-api-key", description = "" }) {
-    const effectiveUserId = String(userId ?? this.defaultUserId).trim() || this.defaultUserId;
+  async upsertUserToken({
+    tenantId,
+    userId,
+    tokenId,
+    value,
+    tokenType = "apiKey",
+    headerName = "x-api-key",
+    description = ""
+  }) {
+    const scope = this.resolveScope(tenantId, userId);
     const effectiveTokenId = String(tokenId ?? "").trim();
     if (!effectiveTokenId) {
       throw new Error("tokenId is required");
@@ -191,7 +218,7 @@ export class TargetServiceClient {
     const effectiveTokenType = String(tokenType ?? "apiKey").trim() || "apiKey";
     const effectiveHeaderName = String(headerName ?? "x-api-key").trim() || "x-api-key";
 
-    const path = this.getUserTokenPath(effectiveUserId);
+    const path = this.getUserTokenPath(scope.tenantId, scope.userId);
     const payload = normalizeTokenPayload(await this.vaultService.getSecret(path));
     const existing = payload.tokens[effectiveTokenId] ?? {};
 
@@ -214,42 +241,46 @@ export class TargetServiceClient {
     await this.vaultService.setSecret(path, payload);
 
     return {
-      userId: effectiveUserId,
+      tenantId: scope.tenantId,
+      userId: scope.userId,
       tokenId: effectiveTokenId,
       activeTokenId: payload.activeTokenId
     };
   }
 
-  async setActiveUserToken({ userId, tokenId }) {
-    const effectiveUserId = String(userId ?? this.defaultUserId).trim() || this.defaultUserId;
+  async setActiveUserToken({ tenantId, userId, tokenId }) {
+    const scope = this.resolveScope(tenantId, userId);
     const effectiveTokenId = String(tokenId ?? "").trim();
     if (!effectiveTokenId) {
       throw new Error("tokenId is required");
     }
 
-    const path = this.getUserTokenPath(effectiveUserId);
+    const path = this.getUserTokenPath(scope.tenantId, scope.userId);
     const payload = normalizeTokenPayload(await this.vaultService.getSecret(path));
     if (!payload.tokens[effectiveTokenId]) {
-      throw new Error(`Token not found for user '${effectiveUserId}': ${effectiveTokenId}`);
+      throw new Error(
+        `Token not found for scope '${scope.tenantId}/${scope.userId}': ${effectiveTokenId}`
+      );
     }
 
     payload.activeTokenId = effectiveTokenId;
     await this.vaultService.setSecret(path, payload);
 
     return {
-      userId: effectiveUserId,
+      tenantId: scope.tenantId,
+      userId: scope.userId,
       activeTokenId: effectiveTokenId
     };
   }
 
-  async deleteUserToken({ userId, tokenId }) {
-    const effectiveUserId = String(userId ?? this.defaultUserId).trim() || this.defaultUserId;
+  async deleteUserToken({ tenantId, userId, tokenId }) {
+    const scope = this.resolveScope(tenantId, userId);
     const effectiveTokenId = String(tokenId ?? "").trim();
     if (!effectiveTokenId) {
       throw new Error("tokenId is required");
     }
 
-    const path = this.getUserTokenPath(effectiveUserId);
+    const path = this.getUserTokenPath(scope.tenantId, scope.userId);
     const payload = normalizeTokenPayload(await this.vaultService.getSecret(path));
     delete payload.tokens[effectiveTokenId];
 
@@ -260,20 +291,23 @@ export class TargetServiceClient {
     await this.vaultService.setSecret(path, payload);
 
     return {
-      userId: effectiveUserId,
+      tenantId: scope.tenantId,
+      userId: scope.userId,
       activeTokenId: payload.activeTokenId,
       remainingTokenCount: Object.keys(payload.tokens).length
     };
   }
 
-  async resolveTokenForRequest(userId, tokenId = "") {
-    const effectiveUserId = String(userId ?? this.defaultUserId).trim() || this.defaultUserId;
-    const payload = normalizeTokenPayload(await this.vaultService.getSecret(this.getUserTokenPath(effectiveUserId)));
+  async resolveTokenForRequest(tenantId, userId, tokenId = "") {
+    const scope = this.resolveScope(tenantId, userId);
+    const payload = normalizeTokenPayload(
+      await this.vaultService.getSecret(this.getUserTokenPath(scope.tenantId, scope.userId))
+    );
     const resolvedTokenId = String(tokenId ?? "").trim() || payload.activeTokenId;
 
     if (!resolvedTokenId || !payload.tokens[resolvedTokenId]) {
       throw new Error(
-        `No active JumpCloud token configured for user '${effectiveUserId}'. Use jumpcloud_user_token_upsert first.`
+        `No active JumpCloud token configured for scope '${scope.tenantId}/${scope.userId}'. Use jumpcloud_user_token_upsert first.`
       );
     }
 
@@ -410,6 +444,7 @@ export class TargetServiceClient {
   }
 
   async request({
+    tenantId,
     userId,
     tokenId,
     domain,
@@ -426,7 +461,7 @@ export class TargetServiceClient {
     const baseUrl = normalizedDomain === "directory-insights" ? this.directoryInsightsBaseUrl : this.consoleBaseUrl;
     const url = buildUrl(baseUrl, normalizedPath, query);
 
-    const token = await this.resolveTokenForRequest(userId, tokenId);
+    const token = await this.resolveTokenForRequest(tenantId, userId, tokenId);
 
     const requestHeaders = {
       Accept: "application/json, text/plain, application/yaml, text/yaml",
@@ -489,6 +524,7 @@ export class TargetServiceClient {
   }
 
   async requestByOperation({
+    tenantId,
     userId,
     tokenId,
     operationId,
@@ -506,6 +542,7 @@ export class TargetServiceClient {
     const resolvedPath = buildRequestPath(op.pathTemplate, pathParams);
 
     return this.request({
+      tenantId,
       userId,
       tokenId,
       domain: op.domain,
@@ -522,8 +559,9 @@ export class TargetServiceClient {
     return cache.operations.find((candidate) => candidate.operationId === operationId) ?? null;
   }
 
-  async healthCheck(userId, tokenId) {
+  async healthCheck(tenantId, userId, tokenId) {
     return this.request({
+      tenantId,
       userId,
       tokenId,
       domain: "console",

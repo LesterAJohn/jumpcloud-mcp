@@ -9,7 +9,7 @@ Core constraints:
 - Keep full JumpCloud API coverage through OpenAPI-driven tooling.
 - Keep all secrets in Vault.
 - Keep all non-secret config in Postgres.
-- Keep user tokens multi-user (`app/users/:userId/...`).
+- Keep user tokens multi-tenant and multi-user (`app/tenants/:tenantId/users/:userId/...`).
 - Keep mutating tools guarded by `authorizationKey` when `MCP_ADMIN_AUTH_KEY` is configured.
 - App-only external deployment mode must remain available for external Vault/Postgres.
 
