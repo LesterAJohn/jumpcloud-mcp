@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { resolve } from "node:path";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 import { env } from "../src/config/env.js";
 import { TargetServiceClient } from "../src/services/targetService.js";
 
@@ -104,6 +107,17 @@ function buildMarkdown(payload) {
   return `${lines.join("\n")}\n`;
 }
 
+export function resolveGeneratedAt(existingPayload, nextPayload, fallbackGeneratedAt) {
+  if (typeof existingPayload?.generatedAt === "string") {
+    const { generatedAt: _generatedAt, ...existingComparablePayload } = existingPayload;
+    if (isDeepStrictEqual(existingComparablePayload, nextPayload)) {
+      return existingPayload.generatedAt;
+    }
+  }
+
+  return fallbackGeneratedAt;
+}
+
 async function main() {
   const client = new TargetServiceClient({
     consoleBaseUrl: env.jumpcloud.consoleBaseUrl,
@@ -129,8 +143,7 @@ async function main() {
 
   const fingerprint = createHash("sha256").update(JSON.stringify(operations)).digest("hex");
 
-  const payload = {
-    generatedAt: new Date().toISOString(),
+  const nextPayload = {
     sources: {
       consoleSpecUrl: env.jumpcloud.consoleSpecUrl,
       directoryInsightsSpecUrl: env.jumpcloud.directoryInsightsSpecUrl
@@ -152,6 +165,20 @@ async function main() {
   const outputDir = "docs";
   await mkdir(outputDir, { recursive: true });
 
+  let existingPayload = null;
+  try {
+    existingPayload = JSON.parse(await readFile(`${outputDir}/openapi-endpoint-inventory.json`, "utf8"));
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      throw error;
+    }
+  }
+
+  const payload = {
+    generatedAt: resolveGeneratedAt(existingPayload, nextPayload, new Date().toISOString()),
+    ...nextPayload
+  };
+
   await writeFile(`${outputDir}/openapi-endpoint-inventory.json`, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
   await writeFile(`${outputDir}/openapi-endpoint-inventory.md`, buildMarkdown(payload), "utf8");
 
@@ -160,7 +187,9 @@ async function main() {
   );
 }
 
-main().catch((error) => {
-  process.stderr.write(`[inventory][error] ${error?.stack ?? error?.message ?? String(error)}\n`);
-  process.exit(1);
-});
+if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
+  main().catch((error) => {
+    process.stderr.write(`[inventory][error] ${error?.stack ?? error?.message ?? String(error)}\n`);
+    process.exit(1);
+  });
+}
