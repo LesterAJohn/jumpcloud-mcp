@@ -60,6 +60,37 @@ function requiresAdminKey(adminAuthKey, method) {
   return Boolean(adminAuthKey) && MUTATING_METHODS.has(normalizeMethod(method));
 }
 
+function toBoolean(value, fallback) {
+  if (value === undefined || value === null) {
+    return fallback;
+  }
+
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  const normalized = String(value).trim().toLowerCase();
+  if (normalized === "true") {
+    return true;
+  }
+  if (normalized === "false") {
+    return false;
+  }
+
+  return fallback;
+}
+
+function toStringArray(value, { upper = false } = {}) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((item) => String(item ?? "").trim())
+    .filter(Boolean)
+    .map((item) => (upper ? item.toUpperCase() : item));
+}
+
 function buildToolSchemas({ adminAuthConfigured }) {
   return [
     {
@@ -181,6 +212,35 @@ function buildToolSchemas({ adminAuthConfigured }) {
           }
         }
       ]
+    },
+    {
+      name: "jumpcloud_tenant_policy_get",
+      category: "read-only",
+      risk: "medium",
+      whenToUse: "Use to inspect effective tenant/user policy guardrails before operational calls.",
+      whenNotToUse: "Do not use for policy mutation.",
+      permissions: "No admin key required.",
+      environmentBehavior: "Reads policy keys from scoped Postgres config.",
+      parameterNotes: "tenantId and userId default to configured defaults when omitted.",
+      responseShape: "{ ok, status, data: { scope, policy } }",
+      failureConditions: "Postgres access failures.",
+      prereqTools: ["jumpcloud_scope_info"],
+      followUpTools: ["jumpcloud_tenant_policy_set", "jumpcloud_tenant_scope_validate"]
+    },
+    {
+      name: "jumpcloud_tenant_policy_set",
+      category: "mutating",
+      risk: "high",
+      whenToUse: "Use to set tenant/user policy guardrails for domain/method/path/mutation control.",
+      whenNotToUse: "Do not use for token or non-policy config changes.",
+      permissions: "Requires authorizationKey when MCP_ADMIN_AUTH_KEY is configured.",
+      environmentBehavior: "Writes policy keys in scoped Postgres config.",
+      parameterNotes: "Accepts partial updates; only provided fields are written.",
+      responseShape: "{ ok, status, data: { scope, policy, updatedKeys } }",
+      failureConditions: "Postgres write failures.",
+      prereqTools: ["jumpcloud_tenant_policy_get"],
+      followUpTools: ["jumpcloud_tenant_scope_validate", "jumpcloud_health_check"],
+      safetyWarnings: "Overly restrictive rules can block API workflows for the scope."
     },
     {
       name: "jumpcloud_operation_invoke",
@@ -342,6 +402,14 @@ export function createMcpServer({
   });
 
   const adminAuthKey = process.env.MCP_ADMIN_AUTH_KEY;
+  const TENANT_POLICY_KEYS = {
+    allowMutations: "jumpcloud.policy.allowMutations",
+    allowedDomains: "jumpcloud.policy.allowedDomains",
+    allowedMethods: "jumpcloud.policy.allowedMethods",
+    allowedPathPrefixes: "jumpcloud.policy.allowedPathPrefixes",
+    enforceMutationOperationAllowList: "jumpcloud.policy.enforceMutationOperationAllowList",
+    allowedOperationIds: "jumpcloud.policy.allowedOperationIds"
+  };
 
   function assertAdminAuthorized(authorizationKey, reason) {
     if (!adminAuthKey) {
@@ -362,6 +430,77 @@ export function createMcpServer({
       tenantId: resolvedTenantId,
       userId: resolvedUserId
     };
+  }
+
+  async function getTenantPolicy(scope) {
+    const [allowMutations, allowedDomains, allowedMethods, allowedPathPrefixes, enforceMutationOperationAllowList, allowedOperationIds] =
+      await Promise.all([
+        configStore.getConfig(TENANT_POLICY_KEYS.allowMutations, scope.tenantId, scope.userId),
+        configStore.getConfig(TENANT_POLICY_KEYS.allowedDomains, scope.tenantId, scope.userId),
+        configStore.getConfig(TENANT_POLICY_KEYS.allowedMethods, scope.tenantId, scope.userId),
+        configStore.getConfig(TENANT_POLICY_KEYS.allowedPathPrefixes, scope.tenantId, scope.userId),
+        configStore.getConfig(TENANT_POLICY_KEYS.enforceMutationOperationAllowList, scope.tenantId, scope.userId),
+        configStore.getConfig(TENANT_POLICY_KEYS.allowedOperationIds, scope.tenantId, scope.userId)
+      ]);
+
+    return {
+      allowMutations: toBoolean(allowMutations?.value, true),
+      allowedDomains: toStringArray(allowedDomains?.value),
+      allowedMethods: toStringArray(allowedMethods?.value, { upper: true }),
+      allowedPathPrefixes: toStringArray(allowedPathPrefixes?.value),
+      enforceMutationOperationAllowList: toBoolean(enforceMutationOperationAllowList?.value, false),
+      allowedOperationIds: toStringArray(allowedOperationIds?.value)
+    };
+  }
+
+  function assertPolicyAllows({ scope, policy, domain, method, path, operationId }) {
+    const normalizedMethod = normalizeMethod(method);
+    const normalizedPath = normalizePath(path);
+    const normalizedDomain = String(domain ?? "").trim().toLowerCase();
+    const mutating = MUTATING_METHODS.has(normalizedMethod);
+
+    if (policy.allowedDomains.length > 0 && normalizedDomain && !policy.allowedDomains.includes(normalizedDomain)) {
+      const error = new Error(
+        `Tenant policy denied domain '${normalizedDomain}' for scope '${scope.tenantId}/${scope.userId}'`
+      );
+      error.status = 403;
+      throw error;
+    }
+
+    if (policy.allowedMethods.length > 0 && !policy.allowedMethods.includes(normalizedMethod)) {
+      const error = new Error(
+        `Tenant policy denied method '${normalizedMethod}' for scope '${scope.tenantId}/${scope.userId}'`
+      );
+      error.status = 403;
+      throw error;
+    }
+
+    if (policy.allowedPathPrefixes.length > 0) {
+      const allowed = policy.allowedPathPrefixes.some((prefix) => normalizedPath.startsWith(normalizePath(prefix)));
+      if (!allowed) {
+        const error = new Error(
+          `Tenant policy denied path '${normalizedPath}' for scope '${scope.tenantId}/${scope.userId}'`
+        );
+        error.status = 403;
+        throw error;
+      }
+    }
+
+    if (mutating && !policy.allowMutations) {
+      const error = new Error(`Tenant policy denied mutating operation for scope '${scope.tenantId}/${scope.userId}'`);
+      error.status = 403;
+      throw error;
+    }
+
+    if (mutating && policy.enforceMutationOperationAllowList) {
+      if (!operationId || !policy.allowedOperationIds.includes(operationId)) {
+        const error = new Error(
+          `Tenant policy denied operationId '${operationId ?? "unknown"}' for scope '${scope.tenantId}/${scope.userId}'`
+        );
+        error.status = 403;
+        throw error;
+      }
+    }
   }
 
   server.tool(
@@ -531,6 +670,12 @@ export function createMcpServer({
         "jumpcloud.timeoutMs": 20000,
         "jumpcloud.bootstrap.version": 1,
         "jumpcloud.bootstrap.updatedAt": new Date().toISOString(),
+        [TENANT_POLICY_KEYS.allowMutations]: true,
+        [TENANT_POLICY_KEYS.allowedDomains]: ["console", "directory-insights"],
+        [TENANT_POLICY_KEYS.allowedMethods]: ["GET", "POST", "PUT", "PATCH", "DELETE"],
+        [TENANT_POLICY_KEYS.allowedPathPrefixes]: [],
+        [TENANT_POLICY_KEYS.enforceMutationOperationAllowList]: false,
+        [TENANT_POLICY_KEYS.allowedOperationIds]: [],
         ...(defaults ?? {})
       };
 
@@ -546,6 +691,80 @@ export function createMcpServer({
           scope,
           appliedDefaults: Object.keys(baseline),
           records
+        }
+      };
+    })
+  );
+
+  server.tool(
+    "jumpcloud_tenant_policy_get",
+    "Read-only tenant/user policy reader. Use to inspect effective policy guardrails for a scope. Risk: medium.",
+    {
+      tenantId: z.string().min(1).optional(),
+      userId: z.string().min(1).optional()
+    },
+    withErrorHandling(async ({ tenantId, userId }) => {
+      const scope = effectiveScope(tenantId, userId);
+      return {
+        ok: true,
+        status: 200,
+        data: {
+          scope,
+          policy: await getTenantPolicy(scope)
+        }
+      };
+    })
+  );
+
+  server.tool(
+    "jumpcloud_tenant_policy_set",
+    "Mutating tenant/user policy writer. Use to update scoped policy guardrails for API execution. Risk: high.",
+    {
+      tenantId: z.string().min(1).optional(),
+      userId: z.string().min(1).optional(),
+      allowMutations: z.boolean().optional(),
+      allowedDomains: z.array(z.enum(["console", "directory-insights"])).optional(),
+      allowedMethods: z.array(z.string().min(1)).optional(),
+      allowedPathPrefixes: z.array(z.string().min(1)).optional(),
+      enforceMutationOperationAllowList: z.boolean().optional(),
+      allowedOperationIds: z.array(z.string().min(1)).optional(),
+      authorizationKey: z.string().optional()
+    },
+    withErrorHandling(async (args) => {
+      assertAdminAuthorized(args.authorizationKey, "tenant policy update");
+      const scope = effectiveScope(args.tenantId, args.userId);
+
+      const updates = [];
+      if (args.allowMutations !== undefined) {
+        updates.push([TENANT_POLICY_KEYS.allowMutations, args.allowMutations]);
+      }
+      if (args.allowedDomains !== undefined) {
+        updates.push([TENANT_POLICY_KEYS.allowedDomains, args.allowedDomains]);
+      }
+      if (args.allowedMethods !== undefined) {
+        updates.push([TENANT_POLICY_KEYS.allowedMethods, args.allowedMethods.map((method) => normalizeMethod(method))]);
+      }
+      if (args.allowedPathPrefixes !== undefined) {
+        updates.push([TENANT_POLICY_KEYS.allowedPathPrefixes, args.allowedPathPrefixes.map((path) => normalizePath(path))]);
+      }
+      if (args.enforceMutationOperationAllowList !== undefined) {
+        updates.push([TENANT_POLICY_KEYS.enforceMutationOperationAllowList, args.enforceMutationOperationAllowList]);
+      }
+      if (args.allowedOperationIds !== undefined) {
+        updates.push([TENANT_POLICY_KEYS.allowedOperationIds, args.allowedOperationIds]);
+      }
+
+      for (const [key, value] of updates) {
+        await configStore.setConfig(key, value, scope.tenantId, scope.userId);
+      }
+
+      return {
+        ok: true,
+        status: 200,
+        data: {
+          scope,
+          updatedKeys: updates.map(([key]) => key),
+          policy: await getTenantPolicy(scope)
         }
       };
     })
@@ -844,6 +1063,15 @@ export function createMcpServer({
       }
 
       const scope = effectiveScope(tenantId, userId);
+      const policy = await getTenantPolicy(scope);
+      assertPolicyAllows({
+        scope,
+        policy,
+        domain: operation?.domain,
+        method: operation?.method ?? "GET",
+        path: operation?.pathTemplate ?? "/",
+        operationId
+      });
 
       return {
         ok: true,
@@ -884,6 +1112,15 @@ export function createMcpServer({
       }
 
       const scope = effectiveScope(tenantId, userId);
+      const policy = await getTenantPolicy(scope);
+      assertPolicyAllows({
+        scope,
+        policy,
+        domain,
+        method: normalizedMethod,
+        path,
+        operationId: null
+      });
 
       return {
         ok: true,

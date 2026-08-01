@@ -15,6 +15,7 @@ Key design requirements implemented:
 - Secrets are persisted in Vault only.
 - Configuration is persisted in Postgres only.
 - User tokens are scoped by tenant and user (`app/tenants/:tenantId/users/:userId/jumpcloud/tokens`).
+- Tenant/user policy guardrails can restrict allowed domains, methods, paths, and mutating operationIds.
 - Mutation tools can require `authorizationKey` when `MCP_ADMIN_AUTH_KEY` is configured.
 - Full JumpCloud API coverage is supported via OpenAPI-driven discovery and execution.
 
@@ -203,6 +204,7 @@ Errors return `isError=true` and shape:
 - Required permissions:
   - Active user token in Vault.
   - `authorizationKey` required for mutating operations if `MCP_ADMIN_AUTH_KEY` is set.
+  - Request must satisfy tenant/user policy guardrails when configured.
 - Environment behavior: operation domain inferred from OpenAPI metadata.
 - Parameters:
   - `userId` optional (defaults to `MCP_CONFIG_DEFAULT_USER_ID`)
@@ -247,6 +249,7 @@ Errors return `isError=true` and shape:
 - Required permissions:
   - Active user token in Vault.
   - `authorizationKey` for mutating methods (`POST|PUT|PATCH|DELETE`) when admin key is configured.
+  - Request must satisfy tenant/user policy guardrails when configured.
 - Environment behavior: routes via `domain` to Console or Directory Insights base URL.
 - Parameters:
   - `userId` optional
@@ -380,6 +383,29 @@ Errors return `isError=true` and shape:
   - Mutating baseline tenant/user config initializer.
   - Requires `authorizationKey` when `MCP_ADMIN_AUTH_KEY` is configured.
   - Writes non-secret defaults only (never token secrets).
+
+### jumpcloud_tenant_policy_get / jumpcloud_tenant_policy_set
+
+- `jumpcloud_tenant_policy_get`:
+  - Read-only policy inspection for effective tenant/user guardrails.
+  - Returns the current policy object for the requested scope.
+- `jumpcloud_tenant_policy_set`:
+  - Mutating policy update tool for tenant/user guardrails.
+  - Requires `authorizationKey` when `MCP_ADMIN_AUTH_KEY` is configured.
+  - Supports partial updates for:
+    - `allowMutations`
+    - `allowedDomains`
+    - `allowedMethods`
+    - `allowedPathPrefixes`
+    - `enforceMutationOperationAllowList`
+    - `allowedOperationIds`
+
+Policy enforcement behavior:
+- If `allowedDomains` is non-empty, requests must match one of those domains.
+- If `allowedMethods` is non-empty, requests must match one of those methods.
+- If `allowedPathPrefixes` is non-empty, request path must start with at least one prefix.
+- If `allowMutations=false`, mutating methods are denied.
+- If `enforceMutationOperationAllowList=true`, mutating `jumpcloud_operation_invoke` calls must have `operationId` in `allowedOperationIds`.
 
 ### jumpcloud_connection_info / jumpcloud_scope_info / jumpcloud_health_check
 

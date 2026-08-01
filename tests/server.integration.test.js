@@ -79,9 +79,19 @@ function createServiceClientMock() {
     },
     async getOperationById(operationId) {
       if (operationId === "systemusers_update") {
-        return { operationId, method: "PUT" };
+        return {
+          operationId,
+          method: "PUT",
+          domain: "console",
+          pathTemplate: "/api/systemusers/{id}"
+        };
       }
-      return { operationId, method: "GET" };
+      return {
+        operationId,
+        method: "GET",
+        domain: "console",
+        pathTemplate: "/api/systemusers"
+      };
     },
     async getUserTokens(tenantId, userId) {
       return {
@@ -400,6 +410,209 @@ test("jumpcloud_tenant_scope_validate reports missing token and config recommend
     assert.equal(validation.payload.data.checks.hasConfig, false);
     assert.equal(Array.isArray(validation.payload.data.recommendations), true);
     assert.equal(validation.payload.data.recommendations.length > 0, true);
+  } finally {
+    restoreEnv();
+  }
+});
+
+test("jumpcloud_tenant_policy_set stores policy and jumpcloud_tenant_policy_get returns it", async () => {
+  const restoreEnv = setEnv({ MCP_ADMIN_AUTH_KEY: "" });
+
+  try {
+    const { client } = createServiceClientMock();
+    const configStore = createConfigStoreMock();
+    const server = createMcpServer({
+      name: "jumpcloud-mcp",
+      version: "0.1.0",
+      serviceClient: client,
+      configStore,
+      appName: "jumpcloud",
+      defaultTenantId: "default",
+      defaultUserId: "default"
+    });
+
+    const setResult = await invokeTool(server, "jumpcloud_tenant_policy_set", {
+      tenantId: "tenant-policy",
+      userId: "ops",
+      allowMutations: false,
+      allowedDomains: ["console"],
+      allowedMethods: ["GET"]
+    });
+
+    assert.equal(setResult.payload.ok, true);
+    assert.equal(setResult.payload.data.policy.allowMutations, false);
+
+    const getResult = await invokeTool(server, "jumpcloud_tenant_policy_get", {
+      tenantId: "tenant-policy",
+      userId: "ops"
+    });
+
+    assert.equal(getResult.payload.ok, true);
+    assert.equal(getResult.payload.data.policy.allowMutations, false);
+    assert.deepEqual(getResult.payload.data.policy.allowedDomains, ["console"]);
+    assert.deepEqual(getResult.payload.data.policy.allowedMethods, ["GET"]);
+  } finally {
+    restoreEnv();
+  }
+});
+
+test("tenant policy denies mutating jumpcloud_api_request when allowMutations=false", async () => {
+  const restoreEnv = setEnv({ MCP_ADMIN_AUTH_KEY: "" });
+
+  try {
+    const { client } = createServiceClientMock();
+    const configStore = createConfigStoreMock();
+    const server = createMcpServer({
+      name: "jumpcloud-mcp",
+      version: "0.1.0",
+      serviceClient: client,
+      configStore,
+      appName: "jumpcloud",
+      defaultTenantId: "default",
+      defaultUserId: "default"
+    });
+
+    await invokeTool(server, "jumpcloud_tenant_policy_set", {
+      tenantId: "tenant-locked",
+      userId: "ops",
+      allowMutations: false
+    });
+
+    const denied = await invokeTool(server, "jumpcloud_api_request", {
+      tenantId: "tenant-locked",
+      userId: "ops",
+      domain: "console",
+      method: "POST",
+      path: "/api/systemusers"
+    });
+
+    assert.equal(denied.result.isError, true);
+    assert.equal(denied.payload.status, 403);
+  } finally {
+    restoreEnv();
+  }
+});
+
+test("tenant policy denies request when domain is outside allowedDomains", async () => {
+  const restoreEnv = setEnv({ MCP_ADMIN_AUTH_KEY: "" });
+
+  try {
+    const { client } = createServiceClientMock();
+    const configStore = createConfigStoreMock();
+    const server = createMcpServer({
+      name: "jumpcloud-mcp",
+      version: "0.1.0",
+      serviceClient: client,
+      configStore,
+      appName: "jumpcloud",
+      defaultTenantId: "default",
+      defaultUserId: "default"
+    });
+
+    await invokeTool(server, "jumpcloud_tenant_policy_set", {
+      tenantId: "tenant-domain",
+      userId: "ops",
+      allowedDomains: ["console"]
+    });
+
+    const denied = await invokeTool(server, "jumpcloud_api_request", {
+      tenantId: "tenant-domain",
+      userId: "ops",
+      domain: "directory-insights",
+      method: "GET",
+      path: "/api/v1/events"
+    });
+
+    assert.equal(denied.result.isError, true);
+    assert.equal(denied.payload.status, 403);
+  } finally {
+    restoreEnv();
+  }
+});
+
+test("tenant policy denies request when path is outside allowedPathPrefixes", async () => {
+  const restoreEnv = setEnv({ MCP_ADMIN_AUTH_KEY: "" });
+
+  try {
+    const { client } = createServiceClientMock();
+    const configStore = createConfigStoreMock();
+    const server = createMcpServer({
+      name: "jumpcloud-mcp",
+      version: "0.1.0",
+      serviceClient: client,
+      configStore,
+      appName: "jumpcloud",
+      defaultTenantId: "default",
+      defaultUserId: "default"
+    });
+
+    await invokeTool(server, "jumpcloud_tenant_policy_set", {
+      tenantId: "tenant-path",
+      userId: "ops",
+      allowedPathPrefixes: ["/api/devices"]
+    });
+
+    const denied = await invokeTool(server, "jumpcloud_api_request", {
+      tenantId: "tenant-path",
+      userId: "ops",
+      domain: "console",
+      method: "GET",
+      path: "/api/systemusers"
+    });
+
+    assert.equal(denied.result.isError, true);
+    assert.equal(denied.payload.status, 403);
+  } finally {
+    restoreEnv();
+  }
+});
+
+test("tenant policy enforces mutation operation allowlist for jumpcloud_operation_invoke", async () => {
+  const restoreEnv = setEnv({ MCP_ADMIN_AUTH_KEY: "" });
+
+  try {
+    const { client } = createServiceClientMock();
+    const configStore = createConfigStoreMock();
+    const server = createMcpServer({
+      name: "jumpcloud-mcp",
+      version: "0.1.0",
+      serviceClient: client,
+      configStore,
+      appName: "jumpcloud",
+      defaultTenantId: "default",
+      defaultUserId: "default"
+    });
+
+    await invokeTool(server, "jumpcloud_tenant_policy_set", {
+      tenantId: "tenant-ops",
+      userId: "ops",
+      allowMutations: true,
+      enforceMutationOperationAllowList: true,
+      allowedOperationIds: ["systemusers_list"]
+    });
+
+    const denied = await invokeTool(server, "jumpcloud_operation_invoke", {
+      tenantId: "tenant-ops",
+      userId: "ops",
+      operationId: "systemusers_update"
+    });
+
+    assert.equal(denied.result.isError, true);
+    assert.equal(denied.payload.status, 403);
+
+    await invokeTool(server, "jumpcloud_tenant_policy_set", {
+      tenantId: "tenant-ops",
+      userId: "ops",
+      allowedOperationIds: ["systemusers_update"]
+    });
+
+    const allowed = await invokeTool(server, "jumpcloud_operation_invoke", {
+      tenantId: "tenant-ops",
+      userId: "ops",
+      operationId: "systemusers_update"
+    });
+
+    assert.equal(allowed.payload.ok, true);
   } finally {
     restoreEnv();
   }
