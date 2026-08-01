@@ -127,6 +127,12 @@ function createServiceClientMock() {
         status: 200,
         ...payload
       };
+    },
+    async listTenantUsersWithTokens(tenantId) {
+      if (tenantId === "tenant-a") {
+        return ["team-a", "ops"];
+      }
+      return [];
     }
   };
 
@@ -158,6 +164,26 @@ function createConfigStoreMock() {
     },
     async deleteConfig(key, tenantId = "default", userId = "default") {
       return records.delete(`${tenantId}/${userId}:${key}`);
+    },
+    async listTenants() {
+      const tenantSet = new Set();
+      for (const scopedKey of records.keys()) {
+        const scopePart = String(scopedKey).split(":")[0];
+        const tenantPart = scopePart.split("/")[0] || "default";
+        tenantSet.add(tenantPart);
+      }
+      return Array.from(tenantSet).sort((a, b) => a.localeCompare(b));
+    },
+    async listUsersByTenant(tenantId = "default") {
+      const userSet = new Set();
+      for (const scopedKey of records.keys()) {
+        const scopePart = String(scopedKey).split(":")[0];
+        const [tenantPart, userPart] = scopePart.split("/");
+        if (tenantPart === tenantId && userPart) {
+          userSet.add(userPart);
+        }
+      }
+      return Array.from(userSet).sort((a, b) => a.localeCompare(b));
     }
   };
 }
@@ -308,6 +334,72 @@ test("jumpcloud_config_set writes user-scoped config", async () => {
 
     assert.equal(getResult.payload.ok, true);
     assert.equal(getResult.payload.data.value, "console");
+  } finally {
+    restoreEnv();
+  }
+});
+
+test("jumpcloud_tenant_bootstrap_defaults writes baseline defaults and tenant list includes tenant", async () => {
+  const restoreEnv = setEnv({ MCP_ADMIN_AUTH_KEY: "" });
+
+  try {
+    const { client } = createServiceClientMock();
+    const configStore = createConfigStoreMock();
+    const server = createMcpServer({
+      name: "jumpcloud-mcp",
+      version: "0.1.0",
+      serviceClient: client,
+      configStore,
+      appName: "jumpcloud",
+      defaultTenantId: "default",
+      defaultUserId: "default"
+    });
+
+    const bootstrap = await invokeTool(server, "jumpcloud_tenant_bootstrap_defaults", {
+      tenantId: "tenant-a",
+      userId: "ops"
+    });
+    assert.equal(bootstrap.payload.ok, true);
+    assert.equal(Array.isArray(bootstrap.payload.data.appliedDefaults), true);
+
+    const tenantList = await invokeTool(server, "jumpcloud_tenant_list", {
+      includeUsers: true
+    });
+    assert.equal(tenantList.payload.ok, true);
+    assert.equal(tenantList.payload.data.count > 0, true);
+    const tenantEntry = tenantList.payload.data.tenants.find((entry) => entry.tenantId === "tenant-a");
+    assert.ok(tenantEntry);
+  } finally {
+    restoreEnv();
+  }
+});
+
+test("jumpcloud_tenant_scope_validate reports missing token and config recommendations", async () => {
+  const restoreEnv = setEnv({ MCP_ADMIN_AUTH_KEY: "" });
+
+  try {
+    const { client } = createServiceClientMock();
+    const configStore = createConfigStoreMock();
+    const server = createMcpServer({
+      name: "jumpcloud-mcp",
+      version: "0.1.0",
+      serviceClient: client,
+      configStore,
+      appName: "jumpcloud",
+      defaultTenantId: "default",
+      defaultUserId: "default"
+    });
+
+    const validation = await invokeTool(server, "jumpcloud_tenant_scope_validate", {
+      tenantId: "tenant-z",
+      userId: "auditor"
+    });
+
+    assert.equal(validation.payload.ok, true);
+    assert.equal(validation.payload.data.checks.hasAnyToken, false);
+    assert.equal(validation.payload.data.checks.hasConfig, false);
+    assert.equal(Array.isArray(validation.payload.data.recommendations), true);
+    assert.equal(validation.payload.data.recommendations.length > 0, true);
   } finally {
     restoreEnv();
   }

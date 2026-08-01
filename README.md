@@ -2,7 +2,7 @@
 
 MCP server for JumpCloud APIs with:
 - Full API surface access through JumpCloud OpenAPI specs
-- Multi-user token management persisted in Vault
+- Multi-tenant and multi-user token management persisted in Vault
 - Non-secret runtime configuration persisted in Postgres
 - Mutating-tool guard using `MCP_ADMIN_AUTH_KEY`
 - Stdio and HTTP transports
@@ -368,6 +368,19 @@ Errors return `isError=true` and shape:
 - Environment behavior: writes/deletes rows in Postgres config table.
 - Safety warning (`jumpcloud_config_delete`): destructive operation.
 
+### jumpcloud_tenant_list / jumpcloud_tenant_scope_validate / jumpcloud_tenant_bootstrap_defaults
+
+- `jumpcloud_tenant_list`:
+  - Read-only tenant discovery from Postgres scope ids.
+  - Optional user discovery from both Postgres and Vault token paths.
+- `jumpcloud_tenant_scope_validate`:
+  - Read-only scope readiness checks for tenant/user.
+  - Reports whether tokens/config are present and recommends next tools.
+- `jumpcloud_tenant_bootstrap_defaults`:
+  - Mutating baseline tenant/user config initializer.
+  - Requires `authorizationKey` when `MCP_ADMIN_AUTH_KEY` is configured.
+  - Writes non-secret defaults only (never token secrets).
+
 ### jumpcloud_connection_info / jumpcloud_scope_info / jumpcloud_health_check
 
 - `jumpcloud_connection_info`: read-only server/runtime metadata.
@@ -391,7 +404,8 @@ npm test
 
 Highlights:
 - OpenAPI discovery and operation invocation tests
-- Multi-user token behavior tests
+- Multi-tenant and multi-user token behavior tests
+- Tenant discovery/scope validation/bootstrap tool tests
 - Admin auth gating tests for mutating tools
 - HTTP integration and Vault-related tests
 

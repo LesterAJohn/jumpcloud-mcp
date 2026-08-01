@@ -166,6 +166,21 @@ export class TargetServiceClient {
     return `${this.appName}/tenants/${scope.tenantId}/users`;
   }
 
+  async listTenantUsersWithTokens(tenantId) {
+    const scope = this.resolveScope(tenantId);
+    const prefix = this.getTenantTokenPrefix(scope.tenantId);
+
+    try {
+      const entries = await this.vaultService.listSecrets(prefix);
+      return entries
+        .map((entry) => String(entry).replace(/\/$/, "").trim())
+        .filter(Boolean)
+        .sort((a, b) => a.localeCompare(b));
+    } catch {
+      return [];
+    }
+  }
+
   async getUserTokens(tenantId, userId, { includeSensitive = false } = {}) {
     const scope = this.resolveScope(tenantId, userId);
     const path = this.getUserTokenPath(scope.tenantId, scope.userId);

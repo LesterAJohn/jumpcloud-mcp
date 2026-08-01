@@ -110,6 +110,79 @@ function buildToolSchemas({ adminAuthConfigured }) {
       ]
     },
     {
+      name: "jumpcloud_tenant_list",
+      category: "read-only",
+      risk: "low",
+      whenToUse: "Use to discover configured tenants and optionally their scoped users.",
+      whenNotToUse: "Do not use for token or config mutation workflows.",
+      permissions: "No admin key required.",
+      environmentBehavior: "Combines Postgres config scope discovery with Vault tenant token user discovery.",
+      parameterNotes: "includeUsers=true returns users from Postgres and Vault per tenant.",
+      responseShape: "{ ok, status, data: { tenants[], count } }",
+      failureConditions: "Postgres or Vault metadata read failures.",
+      prereqTools: ["jumpcloud_scope_info"],
+      followUpTools: ["jumpcloud_tenant_scope_validate", "jumpcloud_tenant_bootstrap_defaults"],
+      examples: [
+        {
+          name: "jumpcloud_tenant_list",
+          arguments: {
+            includeUsers: true
+          }
+        }
+      ]
+    },
+    {
+      name: "jumpcloud_tenant_scope_validate",
+      category: "read-only",
+      risk: "medium",
+      whenToUse: "Use to validate a tenant/user scope has token and config readiness for API calls.",
+      whenNotToUse: "Do not use as a replacement for real API health checks.",
+      permissions: "No admin key required.",
+      environmentBehavior: "Reads Vault token document and scoped Postgres config entries.",
+      parameterNotes: "tenantId and userId default to configured defaults when omitted.",
+      responseShape: "{ ok, status, data: { scope, checks, recommendations } }",
+      failureConditions: "Vault access failures, Postgres access failures.",
+      prereqTools: ["jumpcloud_scope_info"],
+      followUpTools: ["jumpcloud_user_token_upsert", "jumpcloud_config_set", "jumpcloud_health_check"],
+      examples: [
+        {
+          name: "jumpcloud_tenant_scope_validate",
+          arguments: {
+            tenantId: "acme",
+            userId: "ops"
+          }
+        }
+      ]
+    },
+    {
+      name: "jumpcloud_tenant_bootstrap_defaults",
+      category: "mutating",
+      risk: "high",
+      whenToUse: "Use to initialize baseline non-secret config defaults for a tenant/user scope.",
+      whenNotToUse: "Do not use for token or secret storage; use Vault token tools for that.",
+      permissions: "Requires authorizationKey when MCP_ADMIN_AUTH_KEY is configured.",
+      environmentBehavior: "Writes scoped defaults in Postgres for tenant/user.",
+      parameterNotes: "defaults is optional object merged with recommended baseline keys.",
+      responseShape: "{ ok, status, data: { scope, appliedDefaults, records } }",
+      failureConditions: "Postgres write failures.",
+      prereqTools: ["jumpcloud_tenant_scope_validate"],
+      followUpTools: ["jumpcloud_config_get", "jumpcloud_health_check"],
+      safetyWarnings: "Mutating operation; verify tenantId/userId target before execution.",
+      examples: [
+        {
+          name: "jumpcloud_tenant_bootstrap_defaults",
+          arguments: {
+            tenantId: "acme",
+            userId: "ops",
+            defaults: {
+              "jumpcloud.defaultDomain": "console"
+            },
+            authorizationKey: "<admin-key-if-required>"
+          }
+        }
+      ]
+    },
+    {
       name: "jumpcloud_operation_invoke",
       category: "read-only-or-mutating",
       risk: "variable",
@@ -353,6 +426,129 @@ export function createMcpServer({
       status: 200,
       data: await serviceClient.listKnownEndpoints({ domain, search, limit: limit ?? 200 })
     }))
+  );
+
+  server.tool(
+    "jumpcloud_tenant_list",
+    "Read-only tenant discovery. Use to list tenant ids and optionally discover scoped users from Postgres and Vault token paths. Do not use for mutation. Risk: low.",
+    {
+      includeUsers: z.boolean().optional()
+    },
+    withErrorHandling(async ({ includeUsers }) => {
+      const tenantIds = await configStore.listTenants();
+
+      if (includeUsers !== true) {
+        return {
+          ok: true,
+          status: 200,
+          data: {
+            count: tenantIds.length,
+            tenants: tenantIds
+          }
+        };
+      }
+
+      const tenants = [];
+      for (const tenantId of tenantIds) {
+        const [configUsers, vaultUsers] = await Promise.all([
+          configStore.listUsersByTenant(tenantId),
+          serviceClient.listTenantUsersWithTokens(tenantId)
+        ]);
+
+        tenants.push({
+          tenantId,
+          users: {
+            postgresConfig: configUsers,
+            vaultTokens: vaultUsers
+          }
+        });
+      }
+
+      return {
+        ok: true,
+        status: 200,
+        data: {
+          count: tenants.length,
+          tenants
+        }
+      };
+    })
+  );
+
+  server.tool(
+    "jumpcloud_tenant_scope_validate",
+    "Read-only tenant/user scope validation. Use to confirm token and config readiness before operational API calls. Risk: medium.",
+    {
+      tenantId: z.string().min(1).optional(),
+      userId: z.string().min(1).optional()
+    },
+    withErrorHandling(async ({ tenantId, userId }) => {
+      const scope = effectiveScope(tenantId, userId);
+      const tokenDoc = await serviceClient.getUserTokens(scope.tenantId, scope.userId, {
+        includeSensitive: false
+      });
+      const configs = await configStore.listConfigs(undefined, scope.tenantId, scope.userId);
+
+      const hasActiveToken = Boolean(tokenDoc.activeTokenId);
+      const hasAnyToken = Object.keys(tokenDoc.tokens ?? {}).length > 0;
+      const hasConfig = Array.isArray(configs) && configs.length > 0;
+
+      return {
+        ok: true,
+        status: 200,
+        data: {
+          scope,
+          checks: {
+            hasAnyToken,
+            hasActiveToken,
+            hasConfig
+          },
+          recommendations: [
+            ...(hasAnyToken ? [] : ["Run jumpcloud_user_token_upsert to seed a token for this scope."]),
+            ...(hasActiveToken ? [] : ["Run jumpcloud_user_token_set_active to set an active token."]),
+            ...(hasConfig ? [] : ["Run jumpcloud_tenant_bootstrap_defaults to initialize baseline config."])
+          ]
+        }
+      };
+    })
+  );
+
+  server.tool(
+    "jumpcloud_tenant_bootstrap_defaults",
+    "Mutating tenant/user baseline config initializer. Use to write recommended non-secret defaults for a scope. Risk: high.",
+    {
+      tenantId: z.string().min(1).optional(),
+      userId: z.string().min(1).optional(),
+      defaults: z.record(z.string(), z.unknown()).optional(),
+      authorizationKey: z.string().optional()
+    },
+    withErrorHandling(async ({ tenantId, userId, defaults, authorizationKey }) => {
+      assertAdminAuthorized(authorizationKey, "tenant bootstrap defaults");
+      const scope = effectiveScope(tenantId, userId);
+
+      const baseline = {
+        "jumpcloud.defaultDomain": "console",
+        "jumpcloud.timeoutMs": 20000,
+        "jumpcloud.bootstrap.version": 1,
+        "jumpcloud.bootstrap.updatedAt": new Date().toISOString(),
+        ...(defaults ?? {})
+      };
+
+      const records = [];
+      for (const [key, value] of Object.entries(baseline)) {
+        records.push(await configStore.setConfig(key, value, scope.tenantId, scope.userId));
+      }
+
+      return {
+        ok: true,
+        status: 200,
+        data: {
+          scope,
+          appliedDefaults: Object.keys(baseline),
+          records
+        }
+      };
+    })
   );
 
   server.tool(

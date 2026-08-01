@@ -39,6 +39,15 @@ export class ConfigStore {
     };
   }
 
+  parseScopeId(scopeId) {
+    const value = String(scopeId ?? "").trim();
+    const [tenantPart = this.defaultTenantId, userPart = this.defaultUserId] = value.split("/");
+    return {
+      tenantId: tenantPart || this.defaultTenantId,
+      userId: userPart || this.defaultUserId
+    };
+  }
+
   async healthcheck() {
     await this.pool.query("SELECT 1");
     return { ok: true };
@@ -58,11 +67,11 @@ export class ConfigStore {
         );
 
     return result.rows.map((row) => {
-      const [tenantPart = scope.tenantId, userPart = scope.userId] = String(row.user_id).split("/");
+      const parsed = this.parseScopeId(row.user_id);
       return {
         ...row,
-        tenant_id: tenantPart,
-        scoped_user_id: userPart
+        tenant_id: parsed.tenantId,
+        scoped_user_id: parsed.userId
       };
     });
   }
@@ -78,12 +87,34 @@ export class ConfigStore {
     if (!row) {
       return null;
     }
-    const [tenantPart = scope.tenantId, userPart = scope.userId] = String(row.user_id).split("/");
+    const parsed = this.parseScopeId(row.user_id);
     return {
       ...row,
-      tenant_id: tenantPart,
-      scoped_user_id: userPart
+      tenant_id: parsed.tenantId,
+      scoped_user_id: parsed.userId
     };
+  }
+
+  async listTenants() {
+    const result = await this.pool.query(
+      `SELECT DISTINCT split_part(user_id, '/', 1) AS tenant_id FROM ${this.tableName} ORDER BY tenant_id ASC`
+    );
+
+    return result.rows
+      .map((row) => String(row.tenant_id ?? "").trim())
+      .filter(Boolean);
+  }
+
+  async listUsersByTenant(tenantId) {
+    const normalizedTenantId = String(tenantId ?? this.defaultTenantId).trim() || this.defaultTenantId;
+    const result = await this.pool.query(
+      `SELECT DISTINCT split_part(user_id, '/', 2) AS scoped_user_id FROM ${this.tableName} WHERE split_part(user_id, '/', 1) = $1 ORDER BY scoped_user_id ASC`,
+      [normalizedTenantId]
+    );
+
+    return result.rows
+      .map((row) => String(row.scoped_user_id ?? "").trim())
+      .filter(Boolean);
   }
 
   async setConfig(key, value, tenantId, userId) {
