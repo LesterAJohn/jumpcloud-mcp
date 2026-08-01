@@ -29,6 +29,25 @@ Coverage is exposed by:
 - `jumpcloud_operation_invoke` for operationId-driven execution
 - `jumpcloud_api_request` for explicit method/path execution
 
+## Endpoint Inventory Artifact
+
+This repository can generate a deterministic endpoint inventory artifact for diffing API coverage changes:
+
+- JSON inventory: `docs/openapi-endpoint-inventory.json`
+- Markdown summary: `docs/openapi-endpoint-inventory.md`
+
+Commands:
+
+```bash
+npm run inventory:generate
+npm run inventory:check
+```
+
+`inventory:check` regenerates the artifact and fails if committed files are out of date.
+
+CI workflow:
+- `.github/workflows/openapi-inventory-check.yml` runs `npm run inventory:check` on push and pull requests.
+
 ## Architecture
 
 Runtime flow:
